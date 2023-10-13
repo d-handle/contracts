@@ -3,41 +3,64 @@ pragma solidity ^0.8.21;
 
 import "./SoulBoundERC721.sol";
 
+
+// Custom errors
+error InvalidHandle(string handle);         // An invalid handle is passed
+error StakeAmountRequired();                // No stake amount is sent
+error HandleNotAvailable(uint256 tokenId);  // No stake amount is sent
+error NotHandleOwner(string handle);        // Only handle owner is allowed
+
+
 /// @title DHandle NFT contract
 /// @dev Implements the staking and auction mechanisms of the DHandle protocol
 contract DHandle is SoulBoundERC721 {
 
-    /// @notice Error thrown when an invalid handle is passed
-    error InvalidHandle(string handle); 
-
     /// @dev Time in seconds to wait for a bid to close and be able to claim ownership of a handle
     uint256 private constant BID_CLOSE = 30 days;
 
-    /// @info A handle is the tokenId, as uint256 representation of a /[a-z0-9_-]{3,32}/ handle string
 
-    /// @dev Staked amounts for each handle
-    mapping(uint256 handle => uint256) internal _stakeOf;
+    // INFO: A handle is the tokenId, as uint256 representation of a /[a-z0-9_-]{3,32}/ handle string
 
-    /// @dev Current pointed URI for each handle
-    mapping(uint256 handle => string) internal _uriOf;
 
-    /// @dev Current higher bidder for the handles in auction
-    mapping(uint256 handle => address) internal _bidderOf;
+    /// @dev Staked amounts for each tokenId
+    mapping(uint256 tokenId => uint256) internal _stakeOf;
 
-    /// @dev Current higher bid amount for the handles in auction
-    mapping(uint256 handle => uint256) internal _bidAmountOf;
+    /// @dev Current pointed URI for each tokenId
+    mapping(uint256 tokenId => string) internal _uriOf;
 
-    /// @dev Current higher bid closing timestamps for the handles in auction
-    mapping(uint256 handle => uint256) internal _bidCloseOf;
+    /// @dev Current higher bidder for the tokenIds in auction
+    mapping(uint256 tokenId => address) internal _bidderOf;
+
+    /// @dev Current higher bid amount for the tokenIds in auction
+    mapping(uint256 tokenId => uint256) internal _bidAmountOf;
+
+    /// @dev Current higher bid closing timestamps for the tokenIds in auction
+    mapping(uint256 tokenId => uint256) internal _bidCloseOf;
+
 
     /// @dev Initializes the contract by setting ERC721 `name` and `symbol`
     constructor() ERC721("DHandle", "DHandle") { }
 
-    function mint(string memory handle, string memory uri) external {
-        
+
+    function regiter(string memory handle, string memory uri) external payable {
+        mint(toTokenId(handle), uri);
     }
 
-    // function update() {}
+    function mint(uint256 tokenId, string memory uri) public payable {
+        if (msg.value == 0) revert StakeAmountRequired();
+
+        if (_ownerOf(tokenId) != address(0)) revert HandleNotAvailable(tokenId);
+
+        _stakeOf[tokenId] += msg.value;
+        _uriOf[tokenId] = uri;
+
+        _safeMint(msg.sender, tokenId);
+    }
+
+    function update(string memory handle, string memory uri) external {
+        uint256 id = _requireOwner(handle);
+        _uriOf[id] = uri;
+    }
 
     // function bid() {}
 
@@ -89,5 +112,10 @@ contract DHandle is SoulBoundERC721 {
         assembly {
             result := mload(add(handle, 32))
         }
+    }
+
+    function _requireOwner(string memory handle) view internal returns (uint256 tokenId) {
+        tokenId = toTokenId(handle);
+        if (_ownerOf(tokenId) != address(msg.sender)) revert NotHandleOwner(handle);
     }
 }
