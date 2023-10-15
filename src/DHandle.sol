@@ -5,11 +5,11 @@ import "./SoulBoundERC721.sol";
 
 
 // Custom errors
-error InvalidHandle(string handle);         // An invalid handle is passed
-error StakeAmountRequired();                // No stake amount is sent
-error HandleNotAvailable(uint256 tokenId);  // No stake amount is sent
-error NotHandleOwner(string handle);        // Only handle owner is allowed
-
+error InvalidHandle(string handle);                     // An invalid handle is passed
+error StakeAmountRequired();                            // No stake amount is sent
+error HandleNotAvailable(uint256 tokenId);              // No stake amount is sent
+error NotHandleOwner(string handle);                    // Only handle owner is allowed
+error NotEnoughStake(string handle, uint256 amount);    // Not enough stake to request
 
 /// @title DHandle NFT contract
 /// @dev Implements the staking and auction mechanisms of the DHandle protocol
@@ -42,21 +42,20 @@ contract DHandle is SoulBoundERC721 {
     constructor() ERC721("DHandle", "DHandle") { }
 
 
-    function regiter(string memory handle, string memory uri) external payable {
-        mint(toTokenId(handle), uri);
-    }
-
-    function mint(uint256 tokenId, string memory uri) public payable {
+    /// @notice register a new handle if available, by staking any starting anount to it and set the initial profile uri
+    function mint(string memory handle, string memory uri) external payable {
         if (msg.value == 0) revert StakeAmountRequired();
 
-        if (_ownerOf(tokenId) != address(0)) revert HandleNotAvailable(tokenId);
+        uint256 id = toTokenId(handle);
+        if (_ownerOf(id) != address(0)) revert HandleNotAvailable(id);
 
-        _stakeOf[tokenId] += msg.value;
-        _uriOf[tokenId] = uri;
+        _stakeOf[id] += msg.value;
+        _uriOf[id] = uri;
 
-        _safeMint(msg.sender, tokenId);
+        _safeMint(msg.sender, id);
     }
 
+    /// @notice update the profile uri of the handle by the owner only
     function update(string memory handle, string memory uri) external {
         uint256 id = _requireOwner(handle);
         _uriOf[id] = uri;
@@ -68,28 +67,44 @@ contract DHandle is SoulBoundERC721 {
 
     // function deposit() {}
 
-    // function withdraw() {}
+    function withdraw(string memory handle, uint256 amount) public {
+        uint256 id = _requireOwner(handle);
+        _withdraw(handle, id, amount);
+    }
 
-    // function burn() {}
+    function _withdraw(string memory handle, uint256 tokenId, uint256 amount) internal {
+        if (amount > _stakeOf[tokenId]) revert NotEnoughStake(handle, amount);
+        // TODO: transfer and update stake
+    }
+
+    /// @notice unregister an handle by the owner only, and receive the staked amount
+    function burn(string memory handle) external {
+        uint256 id = _requireOwner(handle);
+        // TODO:  Check that there's no bids
+        delete _uriOf[id];
+        _withdraw(handle, id, _stakeOf[id]);
+        _burn(id);
+    }
 
 
-    /// @dev resolve a handle to the IPFS link of its JSON metadata
+    /// @notice resolve a handle to the profile uri
     function resolve(string memory handle) external view returns (string memory) {
         return tokenURI(toTokenId(handle));
     }
 
-    /// @dev return the IPFS link of token id JSON metadata
+    /// @notice return the profile uri of token
     function tokenURI(uint256 tokenId) public view override returns (string memory) {
         _requireOwned(tokenId);
         return _uriOf[tokenId];
     }
 
-    /// @dev Helper function to check and convert from handle string to token id number
+    /// @notice check and convert from handle string to token id number
     function toTokenId(string memory handle) pure public returns (uint256) {
         if (checkHandle(handle) == false) revert InvalidHandle(handle);
         return uint256(toBytes32(handle));
     }
 
+    /// @notice check if a handle is valid
     function checkHandle(string memory handle) pure public returns (bool) {
         bool lastSpecial = false;
         bytes32  b32 = toBytes32(handle);
@@ -106,6 +121,7 @@ contract DHandle is SoulBoundERC721 {
         return true;
     }
 
+    /// @dev convert from handle string to bytes32
     function toBytes32(string memory handle) pure internal returns (bytes32 result) {
         bytes memory temp = bytes(handle);
         if (temp.length == 0 || temp.length > 32) return 0;
