@@ -7,7 +7,9 @@ import "./SoulBoundERC721.sol";
 // Custom errors
 error InvalidHandle(string handle);                     // An invalid handle is passed
 error StakeAmountRequired();                            // No stake amount is sent
-error HandleNotAvailable(uint256 tokenId);              // No stake amount is sent
+error HandleNotAvailable(string handle);                // The handle is already registered
+error InvalidFrontendAddress();                         // Frontend address is 0x0
+error FailedToSendFee(address frontend, uint256 fee);   // Error transfering fee to frontend 
 error NotHandleOwner(string handle);                    // Only handle owner is allowed
 error NotEnoughStake(string handle, uint256 amount);    // Not enough stake to request
 
@@ -44,15 +46,29 @@ contract DHandle is SoulBoundERC721 {
 
     /// @notice register a new handle if available, by staking any starting anount to it and set the initial profile uri
     function mint(string memory handle, string memory uri) external payable {
-        if (msg.value == 0) revert StakeAmountRequired();
+        mint(handle, uri, msg.value, address(0));
+    }
+
+    /// @notice register a new handle if available, by staking any starting anount to it and set the initial profile uri, with frontend fees
+    function mint(string memory handle, string memory uri, uint256 stake, address frontend) public payable {
+        if (msg.value == 0 || stake == 0) revert StakeAmountRequired();
+        if (msg.value < stake) revert NotEnoughStake(handle, stake);
+        if (frontend == address(0)) revert InvalidFrontendAddress();
 
         uint256 id = toTokenId(handle);
-        if (_ownerOf(id) != address(0)) revert HandleNotAvailable(id);
+        if (_ownerOf(id) != address(0)) revert HandleNotAvailable(handle);
 
-        _stakeOf[id] += msg.value;
+        _stakeOf[id] += stake;
         _uriOf[id] = uri;
 
         _safeMint(msg.sender, id);
+
+        // Send frontend fee if any
+        uint256 fee = msg.value - stake;
+        if (fee > 0) {
+            (bool sent, ) = frontend.call{value: fee}("");
+            if (!sent) revert FailedToSendFee(frontend, fee);
+        }
     }
 
     /// @notice update the profile uri of the handle by the owner only
