@@ -84,6 +84,7 @@ contract DHandle is SoulBoundERC721 {
 
         _safeMint(msg.sender, id);
         _uriOf[id] = uri;
+        delete _holdOf[id];
 
         (,uint256 fee) = _deposit(id, amount, frontend);
 
@@ -133,7 +134,35 @@ contract DHandle is SoulBoundERC721 {
 
     /// @notice cancel a bid by the bidder, if after the auction closed the full bid amount will be returned, otherwise only the proportional full days passed
     /// of the auction window will be returned to the bidder, the remaining will be added to the stake of the current owner
-    // function retract() {}
+    function retract(string memory handle, address frontend) public payable {
+        uint256 id = toTokenId(handle);
+        address bidder = _bidderOf[id];
+        if (bidder != msg.sender) revert NotWinningBidder(msg.sender, bidder);
+        if (frontend == address(0) && msg.value != 0) revert InvalidFrontendAddress();
+        uint256 bidValue = _stakeOrBidOf(id);
+        uint256 penalty;
+        uint256 refund;
+        if (_isAuctionOpen(id)) {
+            penalty = bidValue * ((_bidTimeOf[id] + AUCTION_WINDOW - block.timestamp) / 1 days) / (AUCTION_WINDOW / 1 days);
+            refund = bidValue - penalty;
+        } else {
+            penalty = 0;
+            refund = bidValue;
+        }
+        // add penalty to stake if any
+        if (penalty > 0) _stakeOf[id] += penalty;
+        // cleanup the bid
+        delete _bidderOf[id];
+        delete _bidAmountOf[id];
+        delete _bidTimeOf[id];
+        // refund bidder
+        _transferEth(bidder, refund, id);
+
+        // send frontend fee if any
+        if (msg.value > 0) _transferEth(frontend, msg.value, id);
+
+        emit Retracted(msg.sender, handle, block.timestamp, refund, penalty);
+    }
 
     /// @notice claim the handle from current owner if auction closed and return current owner stake
     function claim(string memory handle, string memory uri) external {
@@ -229,6 +258,7 @@ contract DHandle is SoulBoundERC721 {
         delete _uriOf[id];
         _burn(id);
         uint256 refund = _stakeOf[id];
+        _holdOf[id] = block.timestamp;
         _withdraw(id, refund);
 
         emit Burned(msg.sender, handle, block.timestamp, refund);
