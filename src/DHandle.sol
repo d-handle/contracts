@@ -14,8 +14,9 @@ contract DHandle is SoulBoundERC721 {
     event Deposited(address from, string handle, uint256 amount);
     event Withdrawn(address to, string handle, uint256 amount);
     event Bid(address from, string handle, uint256 amount, uint256 time, uint256 fee, address frontend);
+    event Covered(address from, string handle, uint256 amount, uint256 time);
     event Retracted(address from, string handle, uint256 time, uint256 refund, uint256 penalty);
-    event Claimed(address from, string handle, string uri, uint256 refund, address to);
+    event Claimed(address from, string handle, string uri, uint256 time, uint256 refund, address to);
     event Burned(address from, string handle, uint256 time, uint256 refund);
 
     // Custom errors
@@ -79,12 +80,12 @@ contract DHandle is SoulBoundERC721 {
     /// @notice register a new handle if available, by staking any starting amount to it and set the initial profile uri, with frontend fees
     function mint(string memory handle, string memory uri, uint256 amount, address frontend) public payable {
         uint256 id = toTokenId(handle);
-        if (_ownerOf(id) != address(0)) revert HandleNotAvailable(handle);
+        if (!_isAvailable(id)) revert HandleNotAvailable(handle);
 
         _safeMint(msg.sender, id);
         _uriOf[id] = uri;
 
-        uint256 fee = _deposit(id, amount, frontend);
+        (,uint256 fee) = _deposit(id, amount, frontend);
 
         emit Minted(msg.sender, handle, amount, uri, fee, frontend);
     }
@@ -108,6 +109,7 @@ contract DHandle is SoulBoundERC721 {
         if (frontend == address(0) && msg.value != amount) revert InvalidFrontendAddress();
         if (msg.value < amount) revert InvalidEthAmount(amount, msg.value);
         uint256 id = toTokenId(handle);
+        if (!_isRegistered(id)) revert HandleNotRegistered(handle);
         if (_canClaim(id)) revert AuctionClosed();  // during claim window no bids accepted
         if (_bidderOf[id] == msg.sender) revert AlreadyBidded(msg.sender);
         uint256 bidValue = _stakeOrBidOf(id) * 2;
@@ -154,7 +156,7 @@ contract DHandle is SoulBoundERC721 {
         // refund old owner
         _transferEth(oldOwner, oldStake, id);
 
-        emit Claimed(msg.sender, handle, uri, oldStake, oldOwner);
+        emit Claimed(msg.sender, handle, uri, block.timestamp, oldStake, oldOwner);
     }
 
     /// @notice returns the current staked amount (or higher bid if any) for this handle
@@ -181,14 +183,33 @@ contract DHandle is SoulBoundERC721 {
         return _canClaim(id);
     }
 
+    /// @notice check if a handle is on hold after burn
+    function isOnHold(string memory handle) external view returns (bool) {
+        uint256 id = toTokenId(handle);
+        return _isOnHold(id);
+    }
+
+    /// @notice check if a handle is registered
+    function isRegistered(string memory handle) external view returns (bool) {
+        uint256 id = toTokenId(handle);
+        return _isRegistered(id);
+    }
+
+    /// @notice check if a handle is available to mint
+    function isAvailable(string memory handle) external view returns (bool) {
+        uint256 id = toTokenId(handle);
+        return _isAvailable(id);
+    }
+
     /// @notice deposit more stake into an handle
     function deposit(string memory handle) external payable {
         uint256 id = toTokenId(handle);
         if (_ownerOf(id) == address(0)) revert HandleNotRegistered(handle);
 
-        _deposit(id, msg.value, address(0));
+        (bool covered, ) = _deposit(id, msg.value, address(0));
 
         emit Deposited(msg.sender, handle, msg.value);
+        if (covered) emit Covered(msg.sender, handle, _stakeOf[id], block.timestamp);
     }
 
     function withdraw(string memory handle, uint256 amount) external {
@@ -213,14 +234,11 @@ contract DHandle is SoulBoundERC721 {
         emit Burned(msg.sender, handle, block.timestamp, refund);
     }
 
-    /// @notice check if a handle is available to mint
-    function isAvailable(string memory handle) external view returns (bool) {
-        return _ownerOf(toTokenId(handle)) == address(0);
-    }
-
     /// @notice resolve a handle to the profile uri
     function resolve(string memory handle) external view returns (string memory) {
-        return tokenURI(toTokenId(handle));
+        uint256 id = toTokenId(handle);
+        if (_ownerOf(id) == address(0)) revert HandleNotRegistered(handle);
+        return _uriOf[id];
     }
 
     /// @notice return the profile uri of token
@@ -257,7 +275,7 @@ contract DHandle is SoulBoundERC721 {
     // Internal functions ----------
 
     /// @dev internal deposit logic to reuse in external operations
-    function _deposit(uint256 tokenId, uint256 amount, address frontend) internal returns (uint256 fee) {
+    function _deposit(uint256 tokenId, uint256 amount, address frontend) internal returns (bool covered, uint256 fee) {
         if (msg.value == 0 ) revert EthAmountRequired();
         if (msg.value < amount) revert InvalidEthAmount(amount, msg.value);
         if (frontend == address(0) && msg.value != amount) revert InvalidFrontendAddress();
@@ -265,7 +283,8 @@ contract DHandle is SoulBoundERC721 {
         _stakeOf[tokenId] += amount;
 
         // check if deposit covers the current bid, and return bid
-        if (_isBidValid(tokenId) && _stakeOf[tokenId] >= _bidAmountOf[tokenId]) {
+        covered = _isBidValid(tokenId) && _stakeOf[tokenId] >= _bidAmountOf[tokenId];
+        if (covered) {
             // save bid data
             address bidder = _bidderOf[tokenId];
             uint256 bidAmount = _bidAmountOf[tokenId];
@@ -310,6 +329,19 @@ contract DHandle is SoulBoundERC721 {
     function _canClaim(uint256 tokenId) internal view returns (bool) {
         return _bidderOf[tokenId] != address(0) && block.timestamp > (_bidTimeOf[tokenId] + AUCTION_WINDOW) && block.timestamp <= (_bidTimeOf[tokenId] + AUCTION_WINDOW + CLAIM_WINDOW);
     }
+
+    function _isOnHold(uint256 tokenId) internal view returns (bool) {
+        return block.timestamp <= _holdOf[tokenId] + HOLD_WINDOW;
+    }
+
+    function _isRegistered(uint256 tokenId) internal view returns (bool) {
+        return _ownerOf(tokenId) != address(0);
+    }
+
+    function _isAvailable(uint256 tokenId) internal view returns (bool) {
+        return !_isRegistered(tokenId) && !_isOnHold(tokenId);
+    }
+
 
     /// @dev internal requires handle owner or otherwise reverts
     function _requireOwner(string memory handle) view internal returns (uint256 tokenId) {
