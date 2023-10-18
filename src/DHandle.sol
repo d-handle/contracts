@@ -247,6 +247,7 @@ contract DHandle is SoulBoundERC721 {
         if (covered) emit Covered(msg.sender, handle, _stakeOf[id], block.timestamp);
     }
 
+    /// @notice withdraw stake from a handle
     function withdraw(string memory handle, uint256 amount) external {
         uint256 id = _requireOwner(handle);
         uint256 stake = _stakeOf[id];
@@ -366,14 +367,17 @@ contract DHandle is SoulBoundERC721 {
         return _bidderOf[tokenId] != address(0) && block.timestamp > (_bidTimeOf[tokenId] + AUCTION_WINDOW) && block.timestamp <= (_bidTimeOf[tokenId] + AUCTION_WINDOW + CLAIM_WINDOW);
     }
 
+    /// @dev internal to check if handle is on hold after burn
     function _isOnHold(uint256 tokenId) internal view returns (bool) {
         return block.timestamp <= _holdOf[tokenId] + HOLD_WINDOW;
     }
 
+    /// @dev internal to check if handle is registered
     function _isRegistered(uint256 tokenId) internal view returns (bool) {
         return _ownerOf(tokenId) != address(0);
     }
 
+    /// @dev internal to check if handle is available to mint
     function _isAvailable(uint256 tokenId) internal view returns (bool) {
         return !_isRegistered(tokenId) && !_isOnHold(tokenId);
     }
