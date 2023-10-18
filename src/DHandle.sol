@@ -188,10 +188,16 @@ contract DHandle is SoulBoundERC721 {
         emit Claimed(msg.sender, handle, uri, block.timestamp, oldStake, oldOwner);
     }
 
-    /// @notice returns the current staked amount (or higher bid if any) for this handle
+    /// @notice returns the current staked amount for this handle
     function stakeOf(string memory handle) public view returns (uint256 stake) {
         uint256 id = toTokenId(handle);
-        stake = _stakeOrBidOf(id);
+        stake = _stakeOf[id];
+    }
+
+    /// @notice returns the current bid amount for this handle
+    function bidOf(string memory handle) public view returns (uint256 stake) {
+        uint256 id = toTokenId(handle);
+        stake = _bidAmountOf[id];
     }
 
     /// @notice returns if the current bid is still valid
