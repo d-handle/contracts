@@ -33,6 +33,7 @@ contract DHandle is SoulBoundERC721 {
     error InvalidFrontendAddress();                             // Frontend address is 0x0
     error FailedToTransfer(address to, uint256 amount);         // Error transfering fee to frontend
     error NotHandleOwner(string handle);                        // Only handle owner is allowed
+    error InvalidIndexRange(uint256 start, uint256 end);        // Range of indexes out of bounds
 
 
     /// @dev Time in seconds to wait for an auction to close and be able to claim ownership of a handle
@@ -65,6 +66,9 @@ contract DHandle is SoulBoundERC721 {
 
     /// @dev Current higher bid timestamps for the tokenIds in auction
     mapping(uint256 tokenId => uint256) internal _bidTimeOf;
+
+    /// @dev List of handles currently in auction for frontends (might include expired auctions, always check)
+    uint256[] internal _auctions;
 
 
     /// @dev Initializes the contract by setting ERC721 `name` and `symbol`
@@ -134,12 +138,18 @@ contract DHandle is SoulBoundERC721 {
 
     /// @notice cancel a bid by the bidder, if after the auction closed the full bid amount will be returned, otherwise only the proportional full days passed
     /// of the auction window will be returned to the bidder, the remaining will be added to the stake of the current owner
+    function retract(string memory handle) public payable {
+        retract(handle, address(0));
+    }
+
+    /// @notice cancel a bid by the bidder, if after the auction closed the full bid amount will be returned, otherwise only the proportional full days passed
+    /// of the auction window will be returned to the bidder, the remaining will be added to the stake of the current owner
     function retract(string memory handle, address frontend) public payable {
         uint256 id = toTokenId(handle);
         address bidder = _bidderOf[id];
         if (bidder != msg.sender) revert NotWinningBidder(msg.sender, bidder);
         if (frontend == address(0) && msg.value != 0) revert InvalidFrontendAddress();
-        uint256 bidValue = _stakeOrBidOf(id);
+        uint256 bidValue = _bidAmountOf[id];
         uint256 penalty;
         uint256 refund;
         if (_isAuctionOpen(id)) {
@@ -278,6 +288,23 @@ contract DHandle is SoulBoundERC721 {
         return _uriOf[id];
     }
 
+    /// @notice return
+    function auctions() external view returns (uint256) {
+        return _auctions.length;
+    }
+
+    /// @notice return
+    function auctionHandles(uint256 start, uint256 end) external view returns (string[] memory handles) {
+        if (start > end || end >= _auctions.length) revert InvalidIndexRange(start, end);
+
+        uint256 len = end - start + 1;
+        handles = new string[](len);
+
+        for (uint256 i = 0; i < len; i++) {
+            handles[i] = toHandle(_auctions[start + i]);
+        }
+    }
+
     /// @notice return the profile uri of token
     function tokenURI(uint256 tokenId) public view override returns (string memory) {
         _requireOwned(tokenId);     // from ERC721 implementation
@@ -285,6 +312,11 @@ contract DHandle is SoulBoundERC721 {
     }
 
     // Helper functions ----------
+
+    /// @notice convert from token id number to handle string
+    function toHandle(uint256 tokenId) pure public returns (string memory handle) {
+        handle = string(abi.encodePacked(bytes32(tokenId)));
+    }
 
     /// @notice check and convert from handle string to token id number
     function toTokenId(string memory handle) pure public returns (uint256) {
