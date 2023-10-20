@@ -13,7 +13,7 @@ contract DHandle is SoulBoundERC721 {
     event Updated(address owner, string handle, string uri);
     event Deposited(address from, string handle, uint256 amount);
     event Withdrawn(address to, string handle, uint256 amount);
-    event Bid(address from, string handle, uint256 amount, uint256 time, uint256 fee, address frontend);
+    event Bidden(address from, string handle, uint256 amount, uint256 time, uint256 fee, address frontend);
     event Covered(address from, string handle, uint256 amount, uint256 time);
     event Retracted(address from, string handle, uint256 time, uint256 refund, uint256 penalty);
     event Claimed(address from, string handle, string uri, uint256 time, uint256 refund, address to);
@@ -37,39 +37,57 @@ contract DHandle is SoulBoundERC721 {
 
 
     /// @dev Time in seconds to wait for an auction to close and be able to claim ownership of a handle
-    uint256 private constant AUCTION_WINDOW = 30 days;
+    uint128 private constant AUCTION_WINDOW = 30 days;
 
     /// @dev Time in seconds to claim ownership of a handle after auction closed
-    uint256 private constant CLAIM_WINDOW = 3 days;
+    uint128 private constant CLAIM_WINDOW = 3 days;
 
     /// @dev Time in seconds to wait for an handle to become available after burning
-    uint256 private constant HOLD_WINDOW = 90 days;
+    uint128 private constant HOLD_WINDOW = 90 days;
+
+
+    /// @notice structure to store handle registration data
+    struct Reg {
+        uint128 stake;
+        uint128 time;
+        string uri;
+    }
+
+    /// @notice structure to store auction bid data
+    struct Bid {
+        uint128 amount;
+        uint128 time;
+        address bidder;
+    }
+
+    /// @notice structure to return handle data (registrations or auctions) to the frontends
+    struct HandleData {
+        uint128 amount;
+        uint128 time;
+        address actor;
+        string handle;
+    }
 
 
     // INFO: A handle is the tokenId, as uint256 representation of a /[a-z0-9_-]{3,32}/ handle string
 
 
-    /// @dev Staked amounts for each tokenId
-    mapping(uint256 tokenId => uint256) internal _stakeOf;
+    // Storage ----------
 
-    /// @dev Current pointed URI for each tokenId
-    mapping(uint256 tokenId => string) internal _uriOf;
-
-    /// @dev Current timestamps for the tokenIds on hold
-    mapping(uint256 tokenId => uint256) internal _holdOf;
+    /// @dev registration data for each tokenId
+    mapping(uint256 tokenId => Reg) private _regs;
 
     /// @dev Current higher bidder for the tokenIds in auction
-    mapping(uint256 tokenId => address) internal _bidderOf;
+    mapping(uint256 tokenId => Bid) private _bids;
 
-    /// @dev Current higher bid amount for the tokenIds in auction
-    mapping(uint256 tokenId => uint256) internal _bidAmountOf;
-
-    /// @dev Current higher bid timestamps for the tokenIds in auction
-    mapping(uint256 tokenId => uint256) internal _bidTimeOf;
+    /// @dev Current timestamps for the tokenIds on hold
+    mapping(uint256 tokenId => uint128) private _holds;
 
     /// @dev List of handles currently in auction for frontends (might include expired auctions, always check)
-    uint256[] internal _auctions;
+    uint256[] private _auctions;
 
+
+    // Constructor ----------
 
     /// @dev Initializes the contract by setting ERC721 `name` and `symbol`
     constructor() ERC721("DHandle", "DHandle") { }
@@ -78,17 +96,18 @@ contract DHandle is SoulBoundERC721 {
 
     /// @notice register a new handle if available, by staking any starting amount to it and set the initial profile uri
     function mint(string memory handle, string memory uri) external payable {
-        mint(handle, uri, msg.value, address(0));
+        mint(handle, uri, uint128(msg.value), address(0));
     }
 
     /// @notice register a new handle if available, by staking any starting amount to it and set the initial profile uri, with frontend fees
-    function mint(string memory handle, string memory uri, uint256 amount, address frontend) public payable {
+    function mint(string memory handle, string memory uri, uint128 amount, address frontend) public payable {
         uint256 id = toTokenId(handle);
         if (!_isAvailable(id)) revert HandleNotAvailable(handle);
 
         _safeMint(msg.sender, id);
-        _uriOf[id] = uri;
-        delete _holdOf[id];
+        _regs[id].time = uint128(block.timestamp);
+        _regs[id].uri = uri;
+        delete _holds[id];
 
         (,uint256 fee) = _deposit(id, amount, frontend);
 
@@ -98,42 +117,43 @@ contract DHandle is SoulBoundERC721 {
     /// @notice update the profile uri of the handle by the owner only
     function update(string memory handle, string memory uri) external {
         uint256 id = _requireOwner(handle);
-        _uriOf[id] = uri;
+        _regs[id].uri = uri;
 
         emit Updated(msg.sender, handle, uri);
     }
 
     /// @notice place a bid in a handle
     function bid(string memory handle) external payable {
-        bid(handle, msg.value, address(0));
+        bid(handle, uint128(msg.value), address(0));
     }
 
     /// @notice place a bid in a handle, with frontend fees
-    function bid(string memory handle, uint256 amount, address frontend) public payable {
+    function bid(string memory handle, uint128 amount, address frontend) public payable {
         if (msg.value == 0 || amount == 0) revert EthAmountRequired();
         if (frontend == address(0) && msg.value != amount) revert InvalidFrontendAddress();
         if (msg.value < amount) revert InvalidEthAmount(amount, msg.value);
         uint256 id = toTokenId(handle);
         if (!_isRegistered(id)) revert HandleNotRegistered(handle);
         if (_canClaim(id)) revert AuctionClosed();  // during claim window no bids accepted
-        if (_bidderOf[id] == msg.sender) revert AlreadyBidded(msg.sender);
+        if (_bids[id].bidder == msg.sender) revert AlreadyBidded(msg.sender);
         uint256 bidValue = _stakeOrBidOf(id) * 2;
         if (amount != bidValue) revert InvalidEthAmount(bidValue, amount);
 
         // save old bid data
-        address oldBidder = _bidderOf[id];
-        uint256 oldAmount = _bidAmountOf[id];
+        address oldBidder = _bids[id].bidder;
+        uint128 oldAmount = _bids[id].amount;
         // place new bid
-        _bidderOf[id] = msg.sender;
-        _bidAmountOf[id] = amount;
-        _bidTimeOf[id] = block.timestamp;
+        if (oldBidder == address(0)) _auctions.push(id);
+        _bids[id].bidder = msg.sender;
+        _bids[id].amount = amount;
+        _bids[id].time = uint128(block.timestamp);
         // refund old bidder if any
         if (oldBidder != address(0)) _transferEth(oldBidder, oldAmount, id);
         // send frontend fee if any
-        uint256 fee = msg.value - amount;
+        uint128 fee = uint128(msg.value) - amount;
         if (fee > 0) _transferEth(frontend, fee, id);
 
-        emit Bid(msg.sender, handle, amount, block.timestamp, fee, frontend);
+        emit Bidden(msg.sender, handle, amount, block.timestamp, fee, frontend);
     }
 
     /// @notice cancel a bid by the bidder, if after the auction closed the full bid amount will be returned, otherwise only the proportional full days passed
@@ -146,30 +166,28 @@ contract DHandle is SoulBoundERC721 {
     /// of the auction window will be returned to the bidder, the remaining will be added to the stake of the current owner
     function retract(string memory handle, address frontend) public payable {
         uint256 id = toTokenId(handle);
-        address bidder = _bidderOf[id];
+        address bidder = _bids[id].bidder;
         if (bidder != msg.sender) revert NotWinningBidder(msg.sender, bidder);
         if (frontend == address(0) && msg.value != 0) revert InvalidFrontendAddress();
-        uint256 bidValue = _bidAmountOf[id];
-        uint256 penalty;
-        uint256 refund;
+        uint128 bidValue = _bids[id].amount;
+        uint128 penalty;
+        uint128 refund;
         if (_isAuctionOpen(id)) {
-            penalty = bidValue * ((_bidTimeOf[id] + AUCTION_WINDOW - block.timestamp) / 1 days) / (AUCTION_WINDOW / 1 days);
+            penalty = bidValue * ((_bids[id].time + AUCTION_WINDOW - uint128(block.timestamp)) / 1 days) / (AUCTION_WINDOW / 1 days);
             refund = bidValue - penalty;
         } else {
             penalty = 0;
             refund = bidValue;
         }
         // add penalty to stake if any
-        if (penalty > 0) _stakeOf[id] += penalty;
+        if (penalty > 0) _regs[id].stake += penalty;
         // cleanup the bid
-        delete _bidderOf[id];
-        delete _bidAmountOf[id];
-        delete _bidTimeOf[id];
+        _deleteBid(id);
         // refund bidder
         _transferEth(bidder, refund, id);
 
         // send frontend fee if any
-        if (msg.value > 0) _transferEth(frontend, msg.value, id);
+        if (msg.value > 0) _transferEth(frontend, uint128(msg.value), id);
 
         emit Retracted(msg.sender, handle, block.timestamp, refund, penalty);
     }
@@ -177,21 +195,19 @@ contract DHandle is SoulBoundERC721 {
     /// @notice claim the handle from current owner if auction closed and return current owner stake
     function claim(string memory handle, string memory uri) external {
         uint256 id = toTokenId(handle);
-        address bidder = _bidderOf[id];
+        address bidder = _bids[id].bidder;
         if (bidder != msg.sender) revert NotWinningBidder(msg.sender, bidder);
         if (_isAuctionOpen(id)) revert AuctionOngoing();
         if (!_canClaim(id)) revert ClaimExpired();
 
         // save old owner data
         address oldOwner = _ownerOf(id);
-        uint256 oldStake = _stakeOf[id];
+        uint128 oldStake = _regs[id].stake;
         // accept new owner 
-        _update(_bidderOf[id], id, address(0));
-        _stakeOf[id] = _bidAmountOf[id];
+        _update(_bids[id].bidder, id, address(0));
+        _regs[id].stake = _bids[id].amount;
         // cleanup the bid
-        delete _bidderOf[id];
-        delete _bidAmountOf[id];
-        delete _bidTimeOf[id];
+        _deleteBid(id);
         // refund old owner
         _transferEth(oldOwner, oldStake, id);
 
@@ -201,13 +217,13 @@ contract DHandle is SoulBoundERC721 {
     /// @notice returns the current staked amount for this handle
     function stakeOf(string memory handle) public view returns (uint256 stake) {
         uint256 id = toTokenId(handle);
-        stake = _stakeOf[id];
+        stake = _regs[id].stake;
     }
 
     /// @notice returns the current bid amount for this handle
     function bidOf(string memory handle) public view returns (uint256 stake) {
         uint256 id = toTokenId(handle);
-        stake = _bidAmountOf[id];
+        stake = _bids[id].amount;
     }
 
     /// @notice returns if the current bid is still valid
@@ -251,18 +267,19 @@ contract DHandle is SoulBoundERC721 {
         uint256 id = toTokenId(handle);
         if (_ownerOf(id) == address(0)) revert HandleNotRegistered(handle);
 
-        (bool covered, ) = _deposit(id, msg.value, address(0));
+        (bool covered, ) = _deposit(id, uint128(msg.value), address(0));
 
         emit Deposited(msg.sender, handle, msg.value);
-        if (covered) emit Covered(msg.sender, handle, _stakeOf[id], block.timestamp);
+        if (covered) emit Covered(msg.sender, handle, _regs[id].stake, block.timestamp);
     }
 
     /// @notice withdraw stake from a handle
-    function withdraw(string memory handle, uint256 amount) external {
+    function withdraw(string memory handle, uint128 amount) external {
         uint256 id = _requireOwner(handle);
-        uint256 stake = _stakeOf[id];
+        uint256 stake = _regs[id].stake;
         if (amount >= stake) revert InvalidEthAmount(stake, amount);
 
+        // withdraw if no valid bids
         _withdraw(id, amount);
 
         emit Withdrawn(msg.sender, handle, amount);
@@ -272,10 +289,21 @@ contract DHandle is SoulBoundERC721 {
     function burn(string memory handle) external {
         uint256 id = _requireOwner(handle);
 
-        delete _uriOf[id];
+        delete _regs[id];
         _burn(id);
-        uint256 refund = _stakeOf[id];
-        _holdOf[id] = block.timestamp;
+        uint128 refund = _regs[id].stake;
+        _holds[id] = uint128(block.timestamp);
+
+        // refund if there's a stalled bid (not active)
+        if (_bids[id].bidder != address(0)) {
+            // save bid data and delete
+            address bidder = _bids[id].bidder;
+            uint128 amount = _bids[id].amount;
+            _deleteBid(id);
+            // refund bidder
+            _transferEth(bidder, amount, id);
+        }
+        // withdraw if no valid bids
         _withdraw(id, refund);
 
         emit Burned(msg.sender, handle, block.timestamp, refund);
@@ -285,30 +313,53 @@ contract DHandle is SoulBoundERC721 {
     function resolve(string memory handle) external view returns (string memory) {
         uint256 id = toTokenId(handle);
         if (_ownerOf(id) == address(0)) revert HandleNotRegistered(handle);
-        return _uriOf[id];
+        return _regs[id].uri;
     }
 
-    /// @notice return
+    /// @notice return total auctions 
     function auctions() external view returns (uint256) {
         return _auctions.length;
     }
 
-    /// @notice return
-    function auctionHandles(uint256 start, uint256 end) external view returns (string[] memory handles) {
+    /// @notice return auction range to frontends
+    function auctionRange(uint256 start, uint256 end) external view returns (HandleData[] memory range) {
         if (start > end || end >= _auctions.length) revert InvalidIndexRange(start, end);
 
         uint256 len = end - start + 1;
-        handles = new string[](len);
+        range = new HandleData[](len);
 
         for (uint256 i = 0; i < len; i++) {
-            handles[i] = toHandle(_auctions[start + i]);
+            uint256 id = _auctions[start + i];
+            range[i] = HandleData({
+                amount: _bids[id].amount,
+                time:   _bids[id].time,
+                actor:  _bids[id].bidder,
+                handle: toHandle(id)
+            });
         }
+    }
+
+    /// @notice return handle data to frontends
+    function handleData(uint256 tokenId) external view returns (HandleData memory) {
+        return handleData(toHandle(tokenId));
+    }
+
+    function handleData(string memory handle) public view returns (HandleData memory) {
+        uint256 id = toTokenId(handle);
+        if (!_isRegistered(id)) revert HandleNotRegistered(handle);
+
+        return HandleData({
+            amount: _regs[id].stake,
+            time:   _regs[id].time,
+            actor:  _ownerOf(id),
+            handle: handle
+        });
     }
 
     /// @notice return the profile uri of token
     function tokenURI(uint256 tokenId) public view override returns (string memory) {
         _requireOwned(tokenId);     // from ERC721 implementation
-        return _uriOf[tokenId];
+        return _regs[tokenId].uri;
     }
 
     // Helper functions ----------
@@ -344,64 +395,62 @@ contract DHandle is SoulBoundERC721 {
     // Internal functions ----------
 
     /// @dev internal deposit logic to reuse in external operations
-    function _deposit(uint256 tokenId, uint256 amount, address frontend) internal returns (bool covered, uint256 fee) {
+    function _deposit(uint256 tokenId, uint128 amount, address frontend) internal returns (bool covered, uint128 fee) {
         if (msg.value == 0 ) revert EthAmountRequired();
         if (msg.value < amount) revert InvalidEthAmount(amount, msg.value);
         if (frontend == address(0) && msg.value != amount) revert InvalidFrontendAddress();
 
-        _stakeOf[tokenId] += amount;
+        _regs[tokenId].stake += amount;
 
         // check if deposit covers the current bid, and return bid
-        covered = _isBidValid(tokenId) && _stakeOf[tokenId] >= _bidAmountOf[tokenId];
+        covered = _isBidValid(tokenId) && _regs[tokenId].stake >= _bids[tokenId].amount;
         if (covered) {
             // save bid data
-            address bidder = _bidderOf[tokenId];
-            uint256 bidAmount = _bidAmountOf[tokenId];
+            address bidder = _bids[tokenId].bidder;
+            uint128 bidAmount = _bids[tokenId].amount;
             // cleanup bid
-            delete _bidderOf[tokenId];
-            delete _bidAmountOf[tokenId];
-            delete _bidTimeOf[tokenId];
+            _deleteBid(tokenId);
             // refund bidder
             _transferEth(bidder, bidAmount, tokenId);
         }
 
         // Send frontend fee if any
-        fee = msg.value - amount;
+        fee = uint128(msg.value) - amount;
         if (fee > 0) _transferEth(frontend, fee, tokenId);
     }
 
     /// @dev internal withdraw logic to reuse in external operations
-    function _withdraw(uint256 tokenId, uint256 amount) internal {
+    function _withdraw(uint256 tokenId, uint128 amount) internal {
         // check that there's no ongoing bids
         if (_isBidValid(tokenId)) revert AuctionOngoing();
         // transfer and update stake (leave checked)
-        _stakeOf[tokenId] -= amount;
+        _regs[tokenId].stake -= amount;
         if (!_transferEth(msg.sender, amount)) revert FailedToTransfer(msg.sender, amount);
     }
 
     /// @dev internal to return the current staked amount, or higher bid if any, for this token id
     function _stakeOrBidOf(uint256 tokenId) internal view returns (uint256 stake) {
-        stake = _isBidValid(tokenId) ? _bidAmountOf[tokenId] : _stakeOf[tokenId];
+        stake = _isBidValid(tokenId) ? _bids[tokenId].amount : _regs[tokenId].stake;
     }
 
     /// @dev internal to check if current bid is still valid
     function _isBidValid(uint256 tokenId) internal view returns (bool) {
-        return _bidderOf[tokenId] != address(0) && block.timestamp <= (_bidTimeOf[tokenId] + AUCTION_WINDOW + CLAIM_WINDOW);
+        return _bids[tokenId].bidder != address(0) && block.timestamp <= (_bids[tokenId].time + AUCTION_WINDOW + CLAIM_WINDOW);
     }
 
     /// @dev internal to check if current auction is still open
     function _isAuctionOpen(uint256 tokenId) internal view returns (bool) {
-        return _bidderOf[tokenId] != address(0) && block.timestamp <= (_bidTimeOf[tokenId] + AUCTION_WINDOW);
+        return _bids[tokenId].bidder != address(0) && block.timestamp <= (_bids[tokenId].time + AUCTION_WINDOW);
     }
 
     /// @dev internal to check if current auction is still open
     function _canClaim(uint256 tokenId) internal view returns (bool) {
-        return _bidderOf[tokenId] != address(0) && block.timestamp > (_bidTimeOf[tokenId] + AUCTION_WINDOW) && block.timestamp <= (_bidTimeOf[tokenId] + AUCTION_WINDOW + CLAIM_WINDOW);
+        return _bids[tokenId].bidder != address(0) && block.timestamp > (_bids[tokenId].time + AUCTION_WINDOW) && block.timestamp <= (_bids[tokenId].time + AUCTION_WINDOW + CLAIM_WINDOW);
     }
 
     /// @dev internal to check if handle is on hold after burn
     function _isOnHold(uint256 tokenId) internal view returns (bool) {
-        return block.timestamp <= _holdOf[tokenId] + HOLD_WINDOW;
+        return block.timestamp <= _holds[tokenId] + HOLD_WINDOW;
     }
 
     /// @dev internal to check if handle is registered
@@ -414,24 +463,35 @@ contract DHandle is SoulBoundERC721 {
         return !_isRegistered(tokenId) && !_isOnHold(tokenId);
     }
 
-
     /// @dev internal requires handle owner or otherwise reverts
     function _requireOwner(string memory handle) view internal returns (uint256 tokenId) {
         tokenId = toTokenId(handle);
         if (_ownerOf(tokenId) != address(msg.sender)) revert NotHandleOwner(handle);
     }
 
+    function _deleteBid(uint256 tokenId) internal {
+        delete _bids[tokenId];
+        uint256 last = _auctions.length - 1;
+        for (uint256 i = last; i >= 0; i--) {
+            if (_auctions[i] == tokenId) {
+                _auctions[i] = _auctions[last];
+                _auctions.pop();
+                break;
+            }
+        }
+    }
+
     /// @dev transfer ETH to another account
-    function _transferEth(address to, uint256 amount) internal returns (bool sent) {
+    function _transferEth(address to, uint128 amount) internal returns (bool sent) {
         sent = _transferEth(to, amount, 0);
     }
 
     /// @dev transfer ETH to another account
-    function _transferEth(address to, uint256 amount, uint256 fallbackId) internal returns (bool sent) {
+    function _transferEth(address to, uint128 amount, uint256 fallbackId) internal returns (bool sent) {
         (sent, ) = to.call{value: amount}("");
          if (!sent && fallbackId != 0) {
             // fee transfer failed, so add it to stake instead
-            _stakeOf[fallbackId] += amount;
+            _regs[fallbackId].stake += amount;
         }
    }
 
